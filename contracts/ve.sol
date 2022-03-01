@@ -316,6 +316,15 @@ interface IERC20 {
     ) external returns (bool);
 }
 
+interface IAnyCallProxy {
+    function anyCall(
+        address _to,
+        bytes calldata _data,
+        address _fallback,
+        uint256 _toChainID
+    ) external;
+}
+
 struct Point {
     int128 bias;
     int128 slope; // # -dweight / dt
@@ -380,6 +389,10 @@ contract ve is IERC721, IERC721Metadata {
 
     /// @dev Current count of token
     uint internal tokenId;
+
+    address public anyswapRouter;
+    address public pendingAnyswapRouter;
+    uint256 public pendingRouterDelay;
 
     /// @dev Mapping from NFT ID to the address that owns it.
     mapping(uint => address) internal idToOwner;
@@ -1338,4 +1351,63 @@ contract ve is IERC721, IERC721Metadata {
         _removeTokenFrom(msg.sender, _tokenId);
         emit Transfer(owner, address(0), _tokenId);
     }
+
+    function _getRouter() internal returns (address) {
+        if (pendingRouterDelay != 0 && pendingRouterDelay < block.timestamp) {
+            anyswapRouter = pendingAnyswapRouter;
+            pendingRouterDelay = 0;
+        }
+        return anyswapRouter;
+    }
+
+    function changeVault(address _pendingRouter) external returns (bool) {
+        require(msg.sender == _getRouter());
+        require(_pendingRouter != address(0), "AnyswapV3ERC20: address(0x0)");
+        pendingAnyswapRouter = _pendingRouter;
+        pendingRouterDelay = block.timestamp + 86400;
+        emit LogChangeVault(anyswapRouter, _pendingRouter, pendingRouterDelay);
+        return true;
+    }
+
+    function swapOut(uint _tokenId, uint _targetChainID) external {
+        require(attachments[_tokenId] == 0 && !voted[_tokenId], "attached");
+        // Check requirements
+        require(_isApprovedOrOwner(msg.sender, _tokenId));
+
+        // copy the veNFT data to memory before we delete it
+        LockedBalance memory lock = locked[_tokenId];
+
+        // Clear approval. Throws if `_from` is not the current owner
+        _clearApproval(_from, _tokenId);
+        // Remove NFT. Throws if `_tokenId` is not a valid NFT
+        _removeTokenFrom(_from, _tokenId);
+        // Set the block of ownership transfer (for Flash NFT protection)
+        ownership_change[_tokenId] = block.number;
+        // Log the transfer
+        emit Transfer(_from, _to, _tokenId);
+
+        IAnyCallProxy router = IAnyCallProxy(_getRouter());
+        address[] memory to = new address[](1);
+        bytes[] memory data = new bytes[](1);
+        address[] memory callbacks = new address[](1);
+        uint256[] memory nonces = new uint256[](1);
+
+        bytes memory data = abi.encodeWithSelector(ve.swapIn.selector, msg.sender, _tokenId, lock.amount, lock.end);
+        router.anyCall(address(this), data, address(this), _targetChainID);
+    }
+
+    function swapIn(address _to, uint _tokenId, uint _value, uint _unlock_time) external {
+        require(msg.sender == _getRouter());
+        _mint(_to, _tokenId);
+        _deposit_for(_tokenId, _value, _unlock_time, locked[_tokenId], DepositType.CREATE_LOCK_TYPE);
+    }
+
+    function anyFallback(address to, bytes memory data) external {
+        require(msg.sender == _getRouter());
+        (address to, uint tokenId, uint value, uint unlock_time) = abi.decode(data, (address, uint, uint, uint));
+        _mint(to, tokenId);
+        _deposit_for(tokenId, value, unlock_time, locked[_tokenId], DepositType.CREATE_LOCK_TYPE);
+    }
+
+
 }
