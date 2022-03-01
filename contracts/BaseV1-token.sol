@@ -12,6 +12,9 @@ contract BaseV1 {
     mapping(address => mapping(address => uint)) public allowance;
 
     address public minter;
+    address public anyswapRouter;
+    address public pendingAnyswapRouter;
+    uint256 public pendingRouterDelay;
 
     event Transfer(address indexed from, address indexed to, uint value);
     event Approval(address indexed owner, address indexed spender, uint value);
@@ -31,6 +34,14 @@ contract BaseV1 {
         allowance[msg.sender][_spender] = _value;
         emit Approval(msg.sender, _spender, _value);
         return true;
+    }
+
+    function _getRouter() internal returns (address) {
+        if (pendingRouterDelay != 0 && pendingRouterDelay < block.timestamp) {
+            anyswapRouter = pendingAnyswapRouter;
+            pendingRouterDelay = 0;
+        }
+        return anyswapRouter;
     }
 
     function _mint(address _to, uint _amount) internal returns (bool) {
@@ -60,8 +71,26 @@ contract BaseV1 {
     }
 
     function mint(address account, uint amount) external returns (bool) {
-        require(msg.sender == minter);
+        require(msg.sender == minter || msg.sender == _getRouter());
         _mint(account, amount);
+        return true;
+    }
+
+    function burn(address account, uint256 amount) external returns (bool) {
+        require(msg.sender == _getRouter());
+        _totalSupply = _totalSupply.sub(amount);
+        _balances[account] = _balances[account].sub(amount);
+
+        emit Transfer(account, address(0), amount);
+        return true;
+    }
+
+    function changeVault(address _pendingRouter) external returns (bool) {
+        require(msg.sender == _getRouter());
+        require(_pendingRouter != address(0), "AnyswapV3ERC20: address(0x0)");
+        pendingAnyswapRouter = _pendingRouter;
+        pendingRouterDelay = block.timestamp + 86400;
+        emit LogChangeVault(anyswapRouter, _pendingRouter, pendingRouterDelay);
         return true;
     }
 }
